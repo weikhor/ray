@@ -211,6 +211,33 @@ async def test_batch_size_multiple_zero_timeout(use_class):
 
 
 @pytest.mark.asyncio
+async def test_batch_method_shared_by_instances_keeps_self():
+    """Requests from different instances never share one batch (#41380)."""
+
+    class Base:
+        def __init__(self, name: str):
+            self.name = name
+            self.batches = []
+
+        @serve.batch(max_batch_size=10, batch_wait_timeout_s=0.1)
+        async def handle(self, requests: List[str]) -> List[str]:
+            self.batches.append(list(requests))
+            return [f"{self.name}({r})" for r in requests]
+
+    class C(Base):
+        pass
+
+    c, d = C("c"), Base("d")
+    results = await asyncio.gather(
+        c.handle("1"), d.handle("2"), c.handle("3"), d.handle("4")
+    )
+
+    assert results == ["c(1)", "d(2)", "c(3)", "d(4)"]
+    assert sorted(r for b in c.batches for r in b) == ["1", "3"]
+    assert sorted(r for b in d.batches for r in b) == ["2", "4"]
+
+
+@pytest.mark.asyncio
 async def test_batch_timeout_empty_queue():
     """Check that Serve waits when creating batches.
 
