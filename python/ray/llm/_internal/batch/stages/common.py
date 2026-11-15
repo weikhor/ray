@@ -32,3 +32,26 @@ def maybe_convert_ndarray_to_list(
     elif isinstance(params, np.ndarray):
         return params.tolist()
     return params
+
+
+def drop_none_dict_values(params: Any) -> Any:
+    """Recursively drop dict entries whose value is None.
+
+    Ray Data stores dict columns as Arrow structs, so rows whose dicts have
+    different keys come back with the missing keys set to None. This restores
+    each row's original dict. ndarrays are converted to lists, and None items
+    inside lists are kept.
+
+    Args:
+        params: The parameters to clean.
+
+    Returns:
+        The cleaned parameters.
+    """
+    if isinstance(params, dict):
+        return {k: drop_none_dict_values(v) for k, v in params.items() if v is not None}
+    if isinstance(params, np.ndarray):
+        params = params.tolist()
+    if isinstance(params, list):
+        return [drop_none_dict_values(v) for v in params]
+    return params

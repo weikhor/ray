@@ -3,8 +3,10 @@ import math
 import sys
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import numpy as np
 import pytest
 
+import ray
 from ray.data import ActorPoolStrategy
 from ray.llm._internal.batch.constants import vLLMTaskType
 from ray.llm._internal.batch.stages.vllm_engine_stage import (
@@ -387,6 +389,68 @@ async def test_vllm_generate_forwards_tokenization_kwargs(tokenization_kwargs):
         wrapper.engine.generate.call_args.kwargs["tokenization_kwargs"]
         == tokenization_kwargs
     )
+
+
+@pytest.mark.asyncio
+async def test_vllm_prepare_request_mixed_structured_output_schemas():
+    """Rows with different JSON schemas in one block reach vLLM unchanged.
+
+    Ray Data unifies the per-row schemas into one Arrow struct, so each row
+    comes back with the other rows' keys set to None. Those None entries must
+    be dropped, while None items inside lists (e.g. enum values) are kept.
+    """
+    schema_a = {
+        "type": "object",
+        "properties": {"name": {"type": "string"}},
+        "required": ["name"],
+    }
+    schema_b = {
+        "type": "object",
+        "properties": {
+            "status": {"type": "string", "enum": ["paid", "due", None]},
+            "amount": {"type": "number", "minimum": 0},
+        },
+        "required": ["status", "amount"],
+    }
+    ds = ray.data.from_items(
+        [
+            {
+                "prompt": str(i),
+                "sampling_params": {
+                    "max_tokens": 10,
+                    "structured_outputs": {"json": schema},
+                },
+            }
+            for i, schema in enumerate([schema_a, schema_b])
+        ]
+    )
+    batch = next(iter(ds.iter_batches(batch_size=2, batch_format="numpy")))
+    rows = [
+        {
+            "__idx_in_batch": i,
+            "prompt": batch["prompt"][i],
+            "sampling_params": batch["sampling_params"][i],
+        }
+        for i in range(2)
+    ]
+    # Sanity check: Arrow filled in the other row's keys with None.
+    assert (
+        rows[0]["sampling_params"]["structured_outputs"]["json"]["properties"]["status"]
+        is None
+    )
+    assert isinstance(
+        rows[1]["sampling_params"]["structured_outputs"]["json"]["required"],
+        np.ndarray,
+    )
+
+    wrapper = _make_bare_wrapper()
+    fake_vllm = MagicMock()
+    with patch.dict(sys.modules, {"vllm": fake_vllm}):
+        for row in rows:
+            await wrapper._prepare_llm_request(row)
+
+    calls = fake_vllm.sampling_params.StructuredOutputsParams.call_args_list
+    assert [c.kwargs for c in calls] == [{"json": schema_a}, {"json": schema_b}]
 
 
 def test_vllm_stage_generate_declares_tokenization_kwargs():

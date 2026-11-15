@@ -32,6 +32,7 @@ from ray.llm._internal.batch.stages.base import (
     StatefulStageUDF,
 )
 from ray.llm._internal.batch.stages.common import (
+    drop_none_dict_values,
     maybe_convert_ndarray_to_list,
     truncate_str,
 )
@@ -438,7 +439,10 @@ class vLLMEngineWrapper:
             sampling_params = row.pop("sampling_params")
             structured_outputs_config = None
             if "structured_outputs" in sampling_params:
-                structured_outputs_config = maybe_convert_ndarray_to_list(
+                # Rows with different schemas in one block get each other's
+                # keys filled in as None by Arrow; drop them so each row's
+                # schema reaches vLLM as written.
+                structured_outputs_config = drop_none_dict_values(
                     sampling_params.pop("structured_outputs")
                 )
 
